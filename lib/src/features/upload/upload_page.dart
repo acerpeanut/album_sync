@@ -42,11 +42,15 @@ class _UploadPageState extends ConsumerState<UploadPage> {
         appBar: AppBar(
           title: const Text('正在上传'),
           actions: [
-            IconButton(
-              onPressed: () => ref.read(uploadControllerProvider.notifier).cancel(),
-              tooltip: '取消全部',
-              icon: const Icon(Icons.stop_circle_outlined),
-            )
+            summaryAsync.when(
+              data: (s) => IconButton(
+                onPressed: () => ref.read(uploadControllerProvider.notifier).togglePause(),
+                tooltip: s.paused ? '继续' : '暂停',
+                icon: Icon(s.paused ? Icons.play_circle_outline : Icons.pause_circle_outline),
+              ),
+              loading: () => const SizedBox.shrink(),
+              error: (e, st) => const SizedBox.shrink(),
+            ),
           ],
           bottom: const TabBar(tabs: [
             Tab(text: '队列'),
@@ -97,7 +101,10 @@ class _UploadPageState extends ConsumerState<UploadPage> {
                         label: const Text('重新扫描并上传'),
                       ),
                       FilledButton.icon(
-                        onPressed: () => ref.read(uploadControllerProvider.notifier).startQueuedUploads(),
+                        onPressed: summaryAsync.maybeWhen(
+                          data: (s) => s.paused ? null : () => ref.read(uploadControllerProvider.notifier).startQueuedUploads(),
+                          orElse: () => null,
+                        ),
                         icon: const Icon(Icons.play_arrow),
                         label: const Text('仅上传当前队列'),
                       ),
@@ -206,41 +213,57 @@ class _TasksListState extends State<_TasksList> {
         final name = _basenameOfRemote(full);
         final parent = _parentDirOfRemote(full);
         final displayFull = _displayPath(full);
+        final isRunning = widget.status == TaskStatus.running;
+        final progress = (t.bytesTotal > 0) ? (t.bytesSent / t.bytesTotal).clamp(0.0, 1.0) : null;
+        final sentStr = t.bytesSent > 0 ? _fmtBytes(t.bytesSent) : '-';
+        final totalStr = t.bytesTotal > 0 ? _fmtBytes(t.bytesTotal) : '-';
         return ListTile(
           dense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           title: Tooltip(
             message: displayFull,
             child: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis),
           ),
-          subtitle: Text(
-            '${t.albumTitle.isNotEmpty ? '相册:${t.albumTitle} · ' : ''}${parent.isNotEmpty ? parent : '/'}\n'
-            'id=${t.id} size=${t.bytesTotal} sent=${t.bytesSent} status=${t.status.name}${t.lastError != null ? ' err=${t.lastError}' : ''}',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${t.albumTitle.isNotEmpty ? '相册:${t.albumTitle} · ' : ''}${parent.isNotEmpty ? parent : '/'}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (isRunning && progress != null) ...[
+                const SizedBox(height: 4),
+                LinearProgressIndicator(value: progress),
+                const SizedBox(height: 2),
+                Text('进度: ${(progress * 100).toStringAsFixed(0)}%  $sentStr / $totalStr'),
+              ] else ...[
+                Text(
+                  'id=${t.id} size=${t.bytesTotal} sent=${t.bytesSent} status=${t.status.name}${t.lastError != null ? ' err=${t.lastError}' : ''}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ]
+            ],
           ),
           isThreeLine: true,
           onTap: () => _showDetails(context, t, widget.baseUrl),
-          trailing: Wrap(spacing: 8, children: [
-            if (widget.onRetry != null)
-              OutlinedButton(onPressed: () => widget.onRetry!(t.id!), child: const Text('重试')),
-            if (widget.onCancel != null)
-              OutlinedButton(onPressed: () => widget.onCancel!(t.id!), child: const Text('取消')),
-            if (widget.onDelete != null)
-              OutlinedButton(onPressed: () => widget.onDelete!(t.id!), child: const Text('删除')),
-            if (widget.status == TaskStatus.done && (widget.baseUrl?.isNotEmpty ?? false))
-              OutlinedButton(
-                onPressed: () async {
-                  final url = _buildUrl(widget.baseUrl!, t.remotePath);
-                  await _openUrl(url);
-                },
-                child: const Text('打开'),
-              ),
-            if (widget.status == TaskStatus.done && (widget.baseUrl?.isNotEmpty ?? false))
-              OutlinedButton(
-                onPressed: () => _copyUrl(context, _buildUrl(widget.baseUrl!, t.remotePath)),
-                child: const Text('复制链接'),
-              ),
-          ]),
+          trailing: PopupMenuButton<String>(
+            onSelected: (v) => _onAction(v, t),
+            itemBuilder: (_) => [
+              if (widget.onRetry != null)
+                const PopupMenuItem(value: 'retry', child: Text('重试')),
+              if (widget.onCancel != null)
+                const PopupMenuItem(value: 'cancel', child: Text('取消')),
+              if (widget.onDelete != null)
+                const PopupMenuItem(value: 'delete', child: Text('删除')),
+              if (widget.status == TaskStatus.done && (widget.baseUrl?.isNotEmpty ?? false)) ...[
+                const PopupMenuItem(value: 'open', child: Text('打开')),
+                const PopupMenuItem(value: 'copy', child: Text('复制链接')),
+              ],
+            ],
+          ),
         );
       },
     );
@@ -344,5 +367,35 @@ class _TasksListState extends State<_TasksList> {
   void _copyUrl(BuildContext context, String url) {
     Clipboard.setData(ClipboardData(text: url));
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('链接已复制')));
+  }
+
+  void _onAction(String v, UploadTask t) {
+    switch (v) {
+      case 'retry':
+        if (widget.onRetry != null) widget.onRetry!(t.id!);
+        break;
+      case 'cancel':
+        if (widget.onCancel != null) widget.onCancel!(t.id!);
+        break;
+      case 'delete':
+        if (widget.onDelete != null) widget.onDelete!(t.id!);
+        break;
+      case 'open':
+        final url = _buildUrl(widget.baseUrl!, t.remotePath);
+        _openUrl(url);
+        break;
+      case 'copy':
+        _copyUrl(context, _buildUrl(widget.baseUrl!, t.remotePath));
+        break;
+    }
+  }
+
+  String _fmtBytes(int n) {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    double x = n.toDouble();
+    int i = 0;
+    while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
+    final s = x >= 10 || i == 0 ? x.toStringAsFixed(0) : x.toStringAsFixed(1);
+    return '$s ${units[i]}';
   }
 }

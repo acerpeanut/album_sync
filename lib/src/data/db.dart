@@ -217,6 +217,19 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
     );
   }
 
+  static Future<void> updateTotalBytes(int id, int bytesTotal) async {
+    final db = await instance();
+    await db.update(
+      'upload_tasks',
+      {
+        'bytesTotal': bytesTotal,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   static Future<Map<String, int>> stats() async {
     final db = await instance();
     Future<int> cnt(TaskStatus s) async {

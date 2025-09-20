@@ -19,20 +19,23 @@ class UploadSummary {
   final int running;
   final int done;
   final int failed;
+  final bool paused;
 
   const UploadSummary(
       {required this.total,
       required this.queued,
       required this.running,
       required this.done,
-      required this.failed});
+      required this.failed,
+      this.paused = false});
 }
 
 class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
-  UploadController(this.ref) : super(const AsyncValue.data(UploadSummary(total: 0, queued: 0, running: 0, done: 0, failed: 0)));
+  UploadController(this.ref) : super(const AsyncValue.data(UploadSummary(total: 0, queued: 0, running: 0, done: 0, failed: 0, paused: false)));
 
   final Ref ref;
   bool _cancelling = false;
+  bool _paused = false;
   final _client = http.Client();
   final Set<int> _cancelled = {};
 
@@ -165,6 +168,11 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
 
   // Start workers without rescanning; only consumes existing queue.
   Future<void> startQueuedUploads() async {
+    if (_paused) {
+      // do nothing while paused
+      await _refreshStats();
+      return;
+    }
     _cancelling = false;
     state = const AsyncValue.loading();
     try {
@@ -204,6 +212,18 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
   Future<void> cancel() async {
     _cancelling = true;
   }
+
+  void pause() {
+    _paused = true;
+    _refreshStats();
+  }
+
+  void resume() {
+    _paused = false;
+    _refreshStats();
+  }
+
+  void togglePause() => _paused ? resume() : pause();
 
   String _buildRemotePath({required String baseDir, required String albumTitle, required String fileName}) {
     // Split baseDir to avoid encoding internal slashes as %2F
@@ -255,6 +275,10 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
     final password = await ref.read(settingsServiceProvider).loadPassword() ?? '';
 
     while (!_cancelling) {
+      // Pause gate: stop claiming new tasks while paused
+      while (_paused && !_cancelling) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      }
       final task = await AppDatabase.claimNextQueued();
       if (task == null) break;
       if (kVerboseLog) log.i('worker: claim id=${task.id} asset=${task.assetId} path=${task.remotePath}');
@@ -285,6 +309,8 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
         }
         final size = await file.length();
         if (kVerboseLog) log.i('worker: will PUT size=$size id=${task.id}');
+        // Persist total size for progress UI (only once per task)
+        try { await AppDatabase.updateTotalBytes(task.id!, size); } catch (_) {}
         int sent = 0;
         int lastRefresh = DateTime.now().millisecondsSinceEpoch;
         final stream = ProgressByteStream(file.openRead(), (n) async {
@@ -441,6 +467,7 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
       running: map['running']!,
       done: map['done']!,
       failed: map['failed']!,
+      paused: _paused,
     ));
   }
 }
