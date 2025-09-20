@@ -38,8 +38,13 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
   bool _paused = false;
   final _client = http.Client();
   final Set<int> _cancelled = {};
+  bool _workersLaunched = false;
+  List<Future<void>>? _workerFutures;
+  bool _building = false;
 
   Future<void> buildPlanAndStart() async {
+    if (_building) return; // 防重入
+    _building = true;
     _cancelling = false;
     state = const AsyncValue.loading();
     try {
@@ -50,7 +55,13 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
         throw Exception('未获得照片权限，请在系统设置中授予相册访问权限');
       }
       log.i('buildPlan: start wifiOnly=${settings.wifiOnly} includeVideos=${settings.includeVideos} baseDir=${settings.baseRemoteDir}');
-      await AppDatabase.resetRunningToQueued();
+      // 仅在未有工作线程且没有 running 任务时，才重置遗留 running → queued
+      try {
+        final m = await AppDatabase.stats();
+        if (!_workersLaunched && (m['running'] ?? 0) == 0) {
+          await AppDatabase.resetRunningToQueued();
+        }
+      } catch (_) {}
       await AppDatabase.cleanupQueuedDuplicates();
       if (settings.wifiOnly) {
         final wifi = await isOnWifi();
@@ -90,15 +101,9 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
       int skipped = 0;
       int consecutiveSeen = 0;
       const seenBreakThreshold = 500;
-      bool workersStarted = false;
-      final workerFutures = <Future<void>>[];
       void startWorkersIfNeeded() {
-        if (!workersStarted && settings.parallelScanUpload) {
-          workersStarted = true;
-          final parallel = settings.maxParallelUploads;
-          for (int i = 0; i < parallel; i++) {
-            workerFutures.add(_worker());
-          }
+        if (settings.parallelScanUpload) {
+          _ensureWorkersStarted(settings.maxParallelUploads);
         }
       }
 
@@ -150,20 +155,14 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
         tasks.clear();
       }
       log.i('buildPlan: enqueued=${tasks.length} skipped=$skipped existingCached=${existing.length}');
-
-      if (workersStarted) {
-        await Future.wait(workerFutures);
-      } else {
-        // 没启动过（可能没有任务），按需启动一次以便消费零星任务
-        final parallel = settings.maxParallelUploads;
-        final futures = List.generate(parallel, (_) => _worker());
-        await Future.wait(futures);
-      }
+      // 确保至少启动一次工作线程以便消费零星任务
+      _ensureWorkersStarted(settings.maxParallelUploads);
       await _refreshStats();
     } catch (e, st) {
       log.e('buildPlanAndStart error: $e\n$st');
       state = AsyncValue.error(e, st);
     }
+    _building = false;
   }
 
   // Start workers without rescanning; only consumes existing queue.
@@ -183,14 +182,24 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
           throw Exception('当前非 Wi‑Fi 网络，已按设置阻止上传');
         }
       }
-      final parallel = settings.maxParallelUploads;
-      final futures = List.generate(parallel, (_) => _worker());
-      await Future.wait(futures);
+      _ensureWorkersStarted(settings.maxParallelUploads);
       await _refreshStats();
     } catch (e, st) {
       log.e('startQueuedUploads error: $e\n$st');
       state = AsyncValue.error(e, st);
     }
+  }
+
+  void _ensureWorkersStarted(int desired) {
+    if (_workersLaunched) return;
+    _workersLaunched = true;
+    _workerFutures = List.generate(desired, (_) => _worker());
+    // 不阻塞调用方；当全部工作线程退出时自动复位标志
+    Future.wait(_workerFutures!).whenComplete(() {
+      _workersLaunched = false;
+      _workerFutures = null;
+      _refreshStats();
+    });
   }
 
   Future<void> requeueOne(int id) async {
@@ -256,13 +265,34 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
     if (original != null && original.isNotEmpty) {
       return sanitizeSegment(original);
     }
-    String ext = 'jpg';
+    // Choose extension by MIME or asset type to avoid mislabeling videos.
+    String ext;
+    if (a.type == AssetType.video) {
+      ext = 'mp4';
+    } else {
+      ext = 'jpg';
+    }
     final mt = a.mimeType;
     if (mt != null && mt.isNotEmpty) {
-      if (mt.contains('png')) ext = 'png';
-      else if (mt.contains('heic') || mt.contains('heif')) ext = 'heic';
-      else if (mt.contains('jpeg') || mt.contains('jpg')) ext = 'jpg';
-      else if (mt.contains('gif')) ext = 'gif';
+      final low = mt.toLowerCase();
+      if (low.startsWith('image/')) {
+        if (low.contains('png')) ext = 'png';
+        else if (low.contains('heic') || low.contains('heif')) ext = 'heic';
+        else if (low.contains('gif')) ext = 'gif';
+        else if (low.contains('jpeg') || low.contains('jpg')) ext = 'jpg';
+        else if (low.contains('webp')) ext = 'webp';
+      } else if (low.startsWith('video/')) {
+        if (low.contains('mp4')) ext = 'mp4';
+        else if (low.contains('quicktime')) ext = 'mov';
+        else if (low.contains('webm')) ext = 'webm';
+        else if (low.contains('x-matroska')) ext = 'mkv';
+        else if (low.contains('x-msvideo')) ext = 'avi';
+        else if (low.contains('3gpp')) ext = '3gp';
+        else if (low.contains('3gpp2')) ext = '3g2';
+        else if (low.contains('m4v')) ext = 'm4v';
+        else if (low.contains('ogg')) ext = 'ogv';
+        else ext = 'mp4';
+      }
     }
     final ts = a.createDateTime.millisecondsSinceEpoch;
     return sanitizeSegment('${ts}_${a.id}.$ext');

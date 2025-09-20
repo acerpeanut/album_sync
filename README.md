@@ -12,6 +12,41 @@
 - 上传页：生成上传计划、并发上传、基础去重（远端存在即跳过）、进度汇总
 - 设置：修改凭据、并发、仅 Wi‑Fi、是否包含视频
 
+## Logo 资源
+- iOS（无圆角源图）：`assets/logo/album_sync_ios_flat.svg`
+- Android 自适应图标：
+  - 背景：`assets/logo/adaptive_background.svg`
+  - 前景：`assets/logo/adaptive_foreground.svg`
+- 预览主标（圆角背景，适合作为宣传图）：`assets/logo/album_sync_logo.svg`
+- 单色字形（适合深浅色背景）：`assets/logo/album_sync_glyph.svg`
+
+建议配色：
+- 渐变背景：从 `#3B82F6`（蓝）到 `#22D3EE`（青）
+- 图形/箭头：纯白（或在单色版使用深灰 `#111827`）
+
+应用图标生成（推荐）：
+- 使用 flutter_launcher_icons 按平台生成：
+  1) 将上面 SVG 导出为 1024x1024 PNG：
+     - iOS：导出为 `assets/logo/ios_icon.png`（基于 `album_sync_ios_flat.svg`，方形无圆角、满铺、无透明）。
+     - Android：
+       - `assets/logo/adaptive_bg.png`（可用纯色或导出 `adaptive_background.svg`）。
+       - `assets/logo/adaptive_fg.png`（由 `adaptive_foreground.svg` 导出，保留四周安全留白）。
+  2) 在 `pubspec.yaml` 添加：
+     ```yaml
+     dev_dependencies:
+       flutter_launcher_icons: ^0.13.1
+     flutter_icons:
+       android: true
+       ios: true
+       image_path_ios: assets/logo/ios_icon.png
+       adaptive_icon_background: assets/logo/adaptive_bg.png # 或 '#3B82F6'
+       adaptive_icon_foreground: assets/logo/adaptive_fg.png
+     ```
+  3) 执行：`flutter pub get && dart run flutter_launcher_icons`
+  - 结果：
+    - iOS 使用无圆角方形图，系统自动裁圆角（符合 iOS 要求）。
+    - Android 生成自适应圆角图标（API 26+），老设备自动生成兼容图标。
+
 ## 权限
 - Android：INTERNET、ACCESS_NETWORK_STATE、READ_MEDIA_IMAGES、READ_MEDIA_VIDEO（13+）、READ_EXTERNAL_STORAGE（≤12）
 - iOS：NSPhotoLibraryUsageDescription

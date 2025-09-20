@@ -1,0 +1,12 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Monochrome glyph: upload arrow + photo frame -->
+  <g fill="none" stroke="#111827" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="88" y="96" width="264" height="184" rx="28"/>
+    <path d="M120 264 L192 192 L240 232 L276 208 L344 264 Z" fill="#111827" stroke="none"/>
+    <circle cx="320" cy="136" r="12" fill="#111827" stroke="none"/>
+    <path d="M256 128 L256 320"/>
+    <path d="M216 168 L256 128 L296 168"/>
+    <rect x="176" y="336" width="160" height="28" rx="14" fill="#111827" stroke="none"/>
+  </g>
+</svg>
+

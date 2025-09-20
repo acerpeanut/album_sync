@@ -1,0 +1,25 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#22D3EE"/>
+    </linearGradient>
+  </defs>
+  <!-- Full-bleed square background (no corner radius; iOS 系统会自行裁圆角) -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- Photo frame -->
+  <g transform="translate(0,16)">
+    <rect x="236" y="276" width="552" height="388" rx="64" fill="none" stroke="#fff" stroke-width="32" opacity="0.95"/>
+    <circle cx="706" cy="340" r="28" fill="#fff" opacity="0.95"/>
+    <path d="M 276 612 L 424 456 L 540 576 L 604 520 L 748 612 Z" fill="#fff" opacity="0.95"/>
+  </g>
+
+  <!-- Upload arrow (center) -->
+  <g>
+    <path d="M512 328 L512 632" stroke="#fff" stroke-width="56" stroke-linecap="round"/>
+    <path d="M448 392 L512 328 L576 392" fill="none" stroke="#fff" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="360" y="656" width="304" height="56" rx="28" fill="#fff"/>
+  </g>
+</svg>
+

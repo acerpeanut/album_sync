@@ -1,0 +1,18 @@
+<svg width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
+  <!-- Foreground glyph only; leave padding around edges for safe area -->
+  <g transform="translate(0,0)" fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Photo frame (scaled to central 70%) -->
+    <g transform="translate(162,170) scale(0.74)">
+      <rect x="236" y="276" width="552" height="388" rx="64" stroke-width="36"/>
+      <circle cx="706" cy="340" r="30" fill="#ffffff" stroke="none"/>
+      <path d="M 276 612 L 424 456 L 540 576 L 604 520 L 748 612 Z" fill="#ffffff" stroke="none"/>
+    </g>
+    <!-- Upload arrow (center) -->
+    <g stroke-width="60">
+      <path d="M540 330 L540 650"/>
+      <path d="M476 394 L540 330 L604 394"/>
+    </g>
+    <rect x="388" y="700" width="304" height="64" rx="32" fill="#ffffff" stroke="none"/>
+  </g>
+</svg>
+
