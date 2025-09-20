@@ -307,9 +307,9 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
           await AppDatabase.updateProgress(task.id!, 0, TaskStatus.done);
         } else {
           try {
-            // Strategy: use buffered PUT for typical photos to avoid stream stalls on iOS/WebDAV.
-            // Threshold 64MB: most photos/short videos走缓冲上传，超大文件再用流式。
-            if (size <= 64 * 1024 * 1024) {
+            // Strategy: small files buffered, larger files streaming with progress.
+            // Lower threshold to 4MB to avoid long blocking waits without progress.
+            if (size <= 4 * 1024 * 1024) {
               final bytes = await file.readAsBytes();
               final r = await _client
                   .put(
@@ -329,9 +329,15 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
                 await _handleFailure(task, 'HTTP ${r.statusCode}');
               }
             } else {
-              await req.sink.addStream(stream);
+              // Add explicit connection close to avoid problematic keep-alive stalls on some servers
+              req.headers['Connection'] = 'close';
+              // Begin sending before piping body to ensure the consumer is attached to the sink
+              final mb = (size / (1024 * 1024)).ceil();
+              final secs = (60 + mb * 2).clamp(60, 600);
+              final responseFuture = _client.send(req).timeout(Duration(seconds: secs));
+              await req.sink.addStream(stream); // now producer feeds an active consumer
               await req.sink.close();
-              final resp = await _client.send(req).timeout(const Duration(seconds: 90));
+              final resp = await responseFuture;
               if (kVerboseLog) log.i('worker: PUT(stream) status=${resp.statusCode} id=${task.id}');
               if (resp.statusCode >= 200 && resp.statusCode < 300) {
                 await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);

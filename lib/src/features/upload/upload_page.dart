@@ -157,12 +157,17 @@ class _TasksListState extends State<_TasksList> {
   late final Timer _timer;
 
   Future<void> _load() async {
+    if (!mounted) return;
     final first = !_initialized;
-    if (first) setState(() { _loading = true; _error = null; });
+    if (first && mounted) {
+      setState(() { _loading = true; _error = null; });
+    }
     try {
       final list = await AppDatabase.listByStatus(widget.status, limit: 500);
+      if (!mounted) return;
       setState(() { _items = list; _loading = false; _initialized = true; });
     } catch (e) {
+      if (!mounted) return;
       setState(() { _loading = false; _error = '$e'; _initialized = true; });
     }
   }
@@ -172,7 +177,13 @@ class _TasksListState extends State<_TasksList> {
   void initState() {
     super.initState();
     _load();
-    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _load());
+    _timer = Timer.periodic(const Duration(seconds: 2), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      _load();
+    });
   }
 
   @override
