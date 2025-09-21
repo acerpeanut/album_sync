@@ -1,6 +1,6 @@
 import 'dart:async';
 
-typedef ProgressCallback = void Function(int bytesSent);
+typedef ProgressCallback = FutureOr<void> Function(int bytesSent);
 
 class ProgressByteStream extends Stream<List<int>> {
   ProgressByteStream(this._source, this._onProgress);
@@ -21,4 +21,3 @@ class ProgressByteStream extends Stream<List<int>> {
     }, onError: onError, onDone: onDone, cancelOnError: cancelOnError);
   }
 }
-

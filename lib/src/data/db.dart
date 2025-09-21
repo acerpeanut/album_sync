@@ -14,6 +14,7 @@ class UploadTask {
   final TaskStatus status;
   final int retries;
   final String? lastError;
+  final int priority;
 
   const UploadTask({
     this.id,
@@ -25,6 +26,7 @@ class UploadTask {
     this.status = TaskStatus.queued,
     this.retries = 0,
     this.lastError,
+    this.priority = 0,
   });
 
   UploadTask copyWith({
@@ -37,6 +39,7 @@ class UploadTask {
     TaskStatus? status,
     int? retries,
     String? lastError,
+    int? priority,
   }) {
     return UploadTask(
       id: id ?? this.id,
@@ -48,6 +51,7 @@ class UploadTask {
       status: status ?? this.status,
       retries: retries ?? this.retries,
       lastError: lastError ?? this.lastError,
+      priority: priority ?? this.priority,
     );
   }
 
@@ -61,6 +65,7 @@ class UploadTask {
         'status': status.name,
         'retries': retries,
         'lastError': lastError,
+        'priority': priority,
         'updatedAt': DateTime.now().millisecondsSinceEpoch,
       };
 
@@ -76,6 +81,7 @@ class UploadTask {
           (e) => e.name == (m['status'] as String? ?? 'queued')),
       retries: m['retries'] as int? ?? 0,
       lastError: m['lastError'] as String?,
+      priority: m['priority'] as int? ?? 0,
     );
   }
 }
@@ -89,7 +95,7 @@ class AppDatabase {
     final path = p.join(dir.path, 'album_sync.db');
     _db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
 CREATE TABLE upload_tasks (
@@ -102,11 +108,13 @@ CREATE TABLE upload_tasks (
   status TEXT NOT NULL,
   retries INTEGER NOT NULL DEFAULT 0,
   lastError TEXT,
+  priority INTEGER NOT NULL DEFAULT 0,
   updatedAt INTEGER
 );
 CREATE INDEX idx_tasks_status ON upload_tasks(status);
 CREATE INDEX idx_tasks_asset ON upload_tasks(assetId);
 CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
+CREATE INDEX idx_tasks_updatedAt ON upload_tasks(updatedAt);
 ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
@@ -119,6 +127,10 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
           // Reset any stale running tasks to queued
           await db.update('upload_tasks', {'status': TaskStatus.queued.name},
               where: 'status = ?', whereArgs: [TaskStatus.running.name]);
+        }
+        if (oldVersion < 3) {
+          try { await db.execute('ALTER TABLE upload_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
+          await db.execute('CREATE INDEX IF NOT EXISTS idx_tasks_updatedAt ON upload_tasks(updatedAt)');
         }
       },
     );
@@ -153,7 +165,7 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
     final rows = await db.query('upload_tasks',
         where: 'status = ?',
         whereArgs: [TaskStatus.queued.name],
-        orderBy: 'id ASC',
+        orderBy: 'priority DESC, id ASC',
         limit: limit);
     return rows.map(UploadTask.fromMap).toList();
   }
@@ -164,7 +176,7 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
       final rows = await txn.query('upload_tasks',
           where: 'status = ?',
           whereArgs: [TaskStatus.queued.name],
-          orderBy: 'id ASC',
+          orderBy: 'priority DESC, id ASC',
           limit: 1);
       if (rows.isEmpty) return null;
       final id = rows.first['id'] as int;
@@ -202,7 +214,7 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
   }
 
   static Future<void> updateStatus(int id, TaskStatus status,
-      {int? retries, String? lastError}) async {
+      {int? retries, String? lastError, int? priority}) async {
     final db = await instance();
     await db.update(
       'upload_tasks',
@@ -210,6 +222,7 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
         'status': status.name,
         if (retries != null) 'retries': retries,
         if (lastError != null) 'lastError': lastError,
+        if (priority != null) 'priority': priority,
         'updatedAt': DateTime.now().millisecondsSinceEpoch,
       },
       where: 'id = ?',
@@ -257,7 +270,7 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
     return await db.delete(
       'upload_tasks',
       where:
-          "status = ? AND id NOT IN (SELECT MIN(id) FROM upload_tasks WHERE status = ? GROUP BY assetId)",
+          "status = ? AND id NOT IN (SELECT MIN(id) FROM upload_tasks WHERE status = ? GROUP BY assetId, remotePath)",
       whereArgs: [TaskStatus.queued.name, TaskStatus.queued.name],
     );
   }
@@ -287,6 +300,28 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
     return rows.map((e) => e['assetId'] as String).toSet();
   }
 
+  // Return existing pairs as composite keys: "assetId|remotePath" for selected statuses.
+  static Future<Set<String>> existingAssetRemotePairs({
+    bool includeQueued = true,
+    bool includeRunning = true,
+    bool includeDone = true,
+  }) async {
+    final db = await instance();
+    final statuses = <String>[];
+    if (includeQueued) statuses.add(TaskStatus.queued.name);
+    if (includeRunning) statuses.add(TaskStatus.running.name);
+    if (includeDone) statuses.add(TaskStatus.done.name);
+    if (statuses.isEmpty) return <String>{};
+    final placeholders = List.filled(statuses.length, '?').join(',');
+    final rows = await db.query('upload_tasks',
+        columns: ['assetId', 'remotePath'],
+        where: 'status IN ($placeholders)',
+        whereArgs: statuses);
+    return rows
+        .map((e) => '${e['assetId'] as String}|${e['remotePath'] as String}')
+        .toSet();
+  }
+
   // --- Failures & queue management ---
   static Future<List<UploadTask>> listFailed({int limit = 200}) async {
     final db = await instance();
@@ -301,7 +336,14 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
   static Future<void> requeueTask(int id) async {
     final db = await instance();
     await db.update('upload_tasks',
-        {'status': TaskStatus.queued.name, 'bytesSent': 0, 'lastError': null, 'retries': 0, 'updatedAt': DateTime.now().millisecondsSinceEpoch},
+        {
+          'status': TaskStatus.queued.name,
+          'bytesSent': 0,
+          'lastError': null,
+          'retries': 0,
+          'priority': 0,
+          'updatedAt': DateTime.now().millisecondsSinceEpoch
+        },
         where: 'id = ?',
         whereArgs: [id]);
   }
@@ -309,6 +351,19 @@ CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
   static Future<void> deleteTask(int id) async {
     final db = await instance();
     await db.delete('upload_tasks', where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> updateRemotePath(int id, String newRemotePath) async {
+    final db = await instance();
+    await db.update(
+      'upload_tasks',
+      {
+        'remotePath': newRemotePath,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   static Future<List<UploadTask>> listByStatus(TaskStatus status, {int limit = 200}) async {
