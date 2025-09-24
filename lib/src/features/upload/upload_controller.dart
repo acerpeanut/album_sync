@@ -107,7 +107,7 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
       }
       final paths = await PhotoManager.getAssetPathList(
         type: includeVideos ? RequestType.common : RequestType.image,
-        onlyAll: false,
+        onlyAll: true,
         filterOption: filterGroup,
       );
       log.i('buildPlan: albums=${paths.length}');
