@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -7,6 +8,7 @@ import '../../services/webdav_service.dart';
 import '../../services/temp_cleaner.dart';
 import '../../services/remote_indexer.dart';
 import '../../core/server_key.dart';
+import '../../services/metrics_service.dart';
 
 final _statsProvider = FutureProvider<Map<String, int>>((ref) async {
   return AppDatabase.stats();
@@ -22,11 +24,30 @@ final _failedProvider = FutureProvider<List<UploadTask>>((ref) async {
   return rows.map(UploadTask.fromMap).toList();
 });
 
-class DiagnosticsPage extends ConsumerWidget {
+class DiagnosticsPage extends ConsumerStatefulWidget {
   const DiagnosticsPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<DiagnosticsPage> createState() => _DiagnosticsPageState();
+}
+
+class _DiagnosticsPageState extends ConsumerState<DiagnosticsPage> {
+  IndexProgress? _prog;
+  StreamSubscription<IndexProgress>? _sub;
+  bool _indexing = false;
+  MergeProgress? _mprog;
+  StreamSubscription<MergeProgress>? _msub;
+  bool _merging = false;
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ref = this.ref;
     final stats = ref.watch(_statsProvider);
     final settings = ref.watch(settingsControllerProvider);
     final failed = ref.watch(_failedProvider);
@@ -84,6 +105,12 @@ class DiagnosticsPage extends ConsumerWidget {
                 if (s == null || !s.isConfigured) return;
                 final pwd = await ref.read(settingsServiceProvider).loadPassword() ?? '';
                 final idx = ref.read(remoteIndexerProvider);
+                idx.configure(concurrency: s.indexerConcurrency, timeoutSec: s.indexerTimeoutSec);
+                setState(() { _indexing = true; _prog = null; });
+                _sub?.cancel();
+                _sub = idx.progressStream.listen((e) {
+                  setState(() { _prog = e; });
+                });
                 final n = await idx.bootstrap(
                   baseUrl: s.baseUrl!,
                   username: s.username!,
@@ -95,9 +122,77 @@ class DiagnosticsPage extends ConsumerWidget {
                   final cnt = await AppDatabase.remoteIndexCount(key);
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('索引完成: 本次 $n 项，累计 $cnt 项')));
                 }
+                setState(() { _indexing = false; });
                 await ref.read(settingsControllerProvider.notifier).markRemoteIndexNow();
               },
               child: const Text('重建远端哈希索引'),
+            ),
+            if (_indexing) ...[
+              Row(children: [
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: null,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(_prog == null ? '索引中…' : '文件:${_prog!.files} 目录:${_prog!.dirs} 错误:${_prog!.errors}')
+              ]),
+              OutlinedButton(
+                onPressed: () {
+                  ref.read(remoteIndexerProvider).cancel();
+                },
+                child: const Text('取消索引'),
+              ),
+            ],
+            OutlinedButton(
+              onPressed: () async {
+                final s = ref.read(settingsControllerProvider).value;
+                if (s == null || !s.isConfigured) return;
+                final pwd = await ref.read(settingsServiceProvider).loadPassword() ?? '';
+                final idx = ref.read(remoteIndexerProvider);
+                setState(() { _merging = true; _mprog = null; });
+                _msub?.cancel();
+                _msub = idx.mergeProgressStream.listen((e) { setState(() { _mprog = e; }); });
+                final merged = await idx.mergeManifest(
+                  baseUrl: s.baseUrl!,
+                  username: s.username!,
+                  password: pwd,
+                  baseRemoteDir: s.baseRemoteDir ?? '/',
+                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(merged > 0 ? '已合并 $merged 个分片为 Manifest' : '未发现可合并的分片')));
+                }
+                setState(() { _merging = false; });
+              },
+              child: const Text('合并并发布 Manifest'),
+            ),
+            if (_merging)
+              Row(children: [
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: (_mprog != null && _mprog!.total > 0) ? (_mprog!.processed / _mprog!.total) : null,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(_mprog == null ? '合并中…' : '分片:${_mprog!.processed}/${_mprog!.total} 唯一:${_mprog!.unique}')
+              ]),
+            OutlinedButton(
+              onPressed: () async {
+                final s = ref.read(settingsControllerProvider).value;
+                if (s == null || !s.isConfigured) return;
+                final pwd = await ref.read(settingsServiceProvider).loadPassword() ?? '';
+                final idx = ref.read(remoteIndexerProvider);
+                final n = await idx.importManifestOnly(
+                  baseUrl: s.baseUrl!,
+                  username: s.username!,
+                  password: pwd,
+                  baseRemoteDir: s.baseRemoteDir ?? '/',
+                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(n > 0 ? '已从 Manifest 导入 $n 项' : '未发现 Manifest 或为空')));
+                }
+              },
+              child: const Text('仅导入 Manifest'),
             ),
             FilledButton(
               onPressed: () async {
@@ -163,10 +258,10 @@ class DiagnosticsPage extends ConsumerWidget {
           const SizedBox(height: 16),
           const Text('最近失败（最多50条）：'),
           const SizedBox(height: 8),
-          failed.when(
-            data: (list) => Column(
-              children: list
-                  .map((t) => ListTile(
+      failed.when(
+        data: (list) => Column(
+          children: list
+              .map((t) => ListTile(
                         leading: const Icon(Icons.error_outline, color: Colors.red),
                         title: Text(t.remotePath, maxLines: 1, overflow: TextOverflow.ellipsis),
                         subtitle: Text(t.lastError ?? '未知错误'),
@@ -175,9 +270,26 @@ class DiagnosticsPage extends ConsumerWidget {
             ),
             loading: () => const Text('载入中…'),
             error: (e, st) => Text('载入失败记录出错: $e'),
-          ),
-        ],
       ),
+      const SizedBox(height: 16),
+      const Text('跳过原因统计（会话内）：'),
+      const SizedBox(height: 8),
+      _buildSkipStats(),
+    ],
+  ),
+);
+  }
+
+  Widget _buildSkipStats() {
+    final map = ref.read(metricsServiceProvider).skipSnapshot();
+    if (map.isEmpty) return const Text('暂无');
+    final entries = map.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: entries
+          .map((e) => Text('${e.key}: ${e.value}'))
+          .toList(),
     );
   }
 }

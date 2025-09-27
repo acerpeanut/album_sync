@@ -16,6 +16,7 @@ import '../../services/hash_service.dart';
 import '../../services/temp_cleaner.dart';
 import '../../services/remote_indexer.dart';
 import '../../core/server_key.dart';
+import '../../services/metrics_service.dart';
 
 class UploadSummary {
   final int total;
@@ -230,6 +231,7 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
           }
           if (settings.incrementalOnly && consecutiveSeen >= seenBreakThreshold) {
             if (kVerboseLog) log.i('scan: break early album=$albumTitle due to seen streak=$consecutiveSeen');
+            try { ref.read(metricsServiceProvider).incSkip('SCAN_EARLY_BREAK'); } catch (_) {}
             break;
           }
           if (settings.recentPages > 0 && page + 1 >= settings.recentPages) {
@@ -456,6 +458,7 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
         if (info.exists) {
           if (info.size != null && info.size == size) {
             if (kVerboseLog) log.i('worker: exists and same size, skip id=${task.id} reason=SIZE_MATCH');
+            try { ref.read(metricsServiceProvider).incSkip('SIZE_MATCH'); } catch (_) {}
             await AppDatabase.updateTotalBytes(task.id!, size);
             await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
             await ref.read(settingsServiceProvider).markLastSuccessNow();
@@ -502,6 +505,7 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
                   final moved = await _move(baseUrl, username, password, existingPath, effectiveRemotePath);
                   if (moved) {
                     if (kVerboseLog) log.i('worker: MOVE $existingPath -> $effectiveRemotePath');
+                    try { ref.read(metricsServiceProvider).incSkip('MOVE_COLLISION'); } catch (_) {}
                     await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
                     await ref.read(settingsServiceProvider).markLastSuccessNow();
                     _onUploadSuccess();
@@ -511,6 +515,7 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
                 } catch (_) {}
               }
               if (kVerboseLog) log.i('worker: remote-index hit -> skip upload id=${task.id} reason=HASH_HIT');
+              try { ref.read(metricsServiceProvider).incSkip('HASH_HIT'); } catch (_) {}
               await AppDatabase.updateTotalBytes(task.id!, size);
               await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
               await ref.read(settingsServiceProvider).markLastSuccessNow();
@@ -600,6 +605,7 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
             } else if (resp.statusCode == 412 || resp.statusCode == 409) {
               // Treat as already exists (race), mark done without reupload
               if (kVerboseLog) log.w('worker: PUT precondition/conflict -> done id=${task.id} reason=HTTP_412');
+              try { ref.read(metricsServiceProvider).incSkip('HTTP_412'); } catch (_) {}
               await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
               await ref.read(settingsServiceProvider).markLastSuccessNow();
               _onUploadSuccess();

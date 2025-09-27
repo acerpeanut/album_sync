@@ -22,6 +22,8 @@ const _kBootstrapRemoteIndex = 'bootstrapRemoteIndex';
 const _kAllowReorganizeMove = 'allowReorganizeMove';
 const _kHashDuringScan = 'hashDuringScan';
 const _kRemoteIndexTs = 'remoteIndexTs';
+const _kIndexerConcurrency = 'indexerConcurrency';
+const _kIndexerTimeoutSec = 'indexerTimeoutSec';
 
 class AppSettings {
   final String? baseUrl;
@@ -39,6 +41,8 @@ class AppSettings {
   final bool bootstrapRemoteIndex;
   final bool allowReorganizeMove;
   final bool hashDuringScan;
+  final int indexerConcurrency;
+  final int indexerTimeoutSec;
 
   const AppSettings({
     required this.baseUrl,
@@ -56,6 +60,8 @@ class AppSettings {
     required this.bootstrapRemoteIndex,
     required this.allowReorganizeMove,
     required this.hashDuringScan,
+    required this.indexerConcurrency,
+    required this.indexerTimeoutSec,
   });
 
   bool get isConfigured =>
@@ -78,6 +84,8 @@ class AppSettings {
     bool? bootstrapRemoteIndex,
     bool? allowReorganizeMove,
     bool? hashDuringScan,
+    int? indexerConcurrency,
+    int? indexerTimeoutSec,
   }) {
     return AppSettings(
       baseUrl: baseUrl ?? this.baseUrl,
@@ -95,6 +103,8 @@ class AppSettings {
       bootstrapRemoteIndex: bootstrapRemoteIndex ?? this.bootstrapRemoteIndex,
       allowReorganizeMove: allowReorganizeMove ?? this.allowReorganizeMove,
       hashDuringScan: hashDuringScan ?? this.hashDuringScan,
+      indexerConcurrency: indexerConcurrency ?? this.indexerConcurrency,
+      indexerTimeoutSec: indexerTimeoutSec ?? this.indexerTimeoutSec,
     );
   }
 }
@@ -123,6 +133,8 @@ class SettingsService {
     final bootstrapRemoteIndex = prefs.getBool(_kBootstrapRemoteIndex) ?? true;
     final allowReorganizeMove = prefs.getBool(_kAllowReorganizeMove) ?? false;
     final hashDuringScan = prefs.getBool(_kHashDuringScan) ?? false;
+    final indexerConcurrency = prefs.getInt(_kIndexerConcurrency) ?? 4;
+    final indexerTimeoutSec = prefs.getInt(_kIndexerTimeoutSec) ?? 60;
     return AppSettings(
       baseUrl: baseUrl,
       username: username,
@@ -139,6 +151,8 @@ class SettingsService {
       bootstrapRemoteIndex: bootstrapRemoteIndex,
       allowReorganizeMove: allowReorganizeMove,
       hashDuringScan: hashDuringScan,
+      indexerConcurrency: indexerConcurrency,
+      indexerTimeoutSec: indexerTimeoutSec,
     );
   }
 
@@ -159,6 +173,8 @@ class SettingsService {
     bool bootstrapRemoteIndex = true,
     bool allowReorganizeMove = false,
     bool hashDuringScan = false,
+    int indexerConcurrency = 4,
+    int indexerTimeoutSec = 60,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kBaseUrl, baseUrl);
@@ -176,6 +192,8 @@ class SettingsService {
     await prefs.setBool(_kBootstrapRemoteIndex, bootstrapRemoteIndex);
     await prefs.setBool(_kAllowReorganizeMove, allowReorganizeMove);
     await prefs.setBool(_kHashDuringScan, hashDuringScan);
+    await prefs.setInt(_kIndexerConcurrency, indexerConcurrency);
+    await prefs.setInt(_kIndexerTimeoutSec, indexerTimeoutSec);
     await _secure.write(key: _kPasswordKey, value: password);
   }
 
@@ -200,6 +218,8 @@ class SettingsService {
     await prefs.remove(_kBootstrapRemoteIndex);
     await prefs.remove(_kAllowReorganizeMove);
     await prefs.remove(_kHashDuringScan);
+    await prefs.remove(_kIndexerConcurrency);
+    await prefs.remove(_kIndexerTimeoutSec);
     await _secure.delete(key: _kPasswordKey);
   }
 
@@ -247,6 +267,8 @@ class SettingsController extends StateNotifier<AsyncValue<AppSettings>> {
     bool bootstrapRemoteIndex = true,
     bool allowReorganizeMove = false,
     bool hashDuringScan = false,
+    int indexerConcurrency = 4,
+    int indexerTimeoutSec = 60,
   }) async {
     state = const AsyncValue.loading();
     await _service.save(
@@ -266,6 +288,8 @@ class SettingsController extends StateNotifier<AsyncValue<AppSettings>> {
       bootstrapRemoteIndex: bootstrapRemoteIndex,
       allowReorganizeMove: allowReorganizeMove,
       hashDuringScan: hashDuringScan,
+      indexerConcurrency: indexerConcurrency,
+      indexerTimeoutSec: indexerTimeoutSec,
     );
     await _load();
   }

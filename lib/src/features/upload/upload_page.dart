@@ -4,7 +4,6 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../services/settings_service.dart';
 import 'upload_controller.dart';
-import 'failures_page.dart';
 import '../../data/db.dart';
 import 'dart:async';
 import 'package:url_launcher/url_launcher_string.dart';

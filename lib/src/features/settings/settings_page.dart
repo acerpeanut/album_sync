@@ -31,6 +31,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _bootstrapRemoteIndex = true;
   bool _allowReorganizeMove = false;
   bool _hashDuringScan = false;
+  int _indexerConcurrency = 4;
+  int _indexerTimeoutSec = 60;
 
   @override
   void initState() {
@@ -51,6 +53,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _bootstrapRemoteIndex = s?.bootstrapRemoteIndex ?? true;
     _allowReorganizeMove = s?.allowReorganizeMove ?? false;
     _hashDuringScan = s?.hashDuringScan ?? false;
+    _indexerConcurrency = s?.indexerConcurrency ?? 4;
+    _indexerTimeoutSec = s?.indexerTimeoutSec ?? 60;
   }
 
   @override
@@ -99,6 +103,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           bootstrapRemoteIndex: _bootstrapRemoteIndex,
           allowReorganizeMove: _allowReorganizeMove,
           hashDuringScan: _hashDuringScan,
+          indexerConcurrency: _indexerConcurrency,
+          indexerTimeoutSec: _indexerTimeoutSec,
         );
     if (!mounted) return;
     Navigator.of(context).pop(true);
@@ -212,6 +218,28 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 value: _allowReorganizeMove,
                 onChanged: (v) => setState(() => _allowReorganizeMove = v),
               ),
+              Row(children: [
+                const Text('索引并发：'),
+                const SizedBox(width: 8),
+                DropdownButton<int>(
+                  value: _indexerConcurrency,
+                  items: const [2,3,4,5,6]
+                      .map((e) => DropdownMenuItem(value: e, child: Text('$e')))
+                      .toList(),
+                  onChanged: (v) => setState(() => _indexerConcurrency = v ?? 4),
+                ),
+                const SizedBox(width: 16),
+                const Text('超时(秒)：'),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 80,
+                  child: TextFormField(
+                    initialValue: _indexerTimeoutSec.toString(),
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) => _indexerTimeoutSec = int.tryParse(v) ?? 60,
+                  ),
+                ),
+              ]),
               Row(children: [
                 const Text('并发上传数：'),
                 DropdownButton<int>(
