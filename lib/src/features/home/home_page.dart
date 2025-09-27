@@ -8,6 +8,7 @@ import '../settings/settings_page.dart';
 import '../drive/drive_browser_page.dart';
 import '../../core/config.dart';
 import '../../services/settings_service.dart';
+import '../../services/temp_cleaner.dart';
 
 final albumsProvider = FutureProvider<List<AlbumInfo>>((ref) async {
   final media = ref.read(mediaServiceProvider);
@@ -31,6 +32,7 @@ class HomePage extends ConsumerStatefulWidget {
 
 class _HomePageState extends ConsumerState<HomePage> {
   bool _autoStarted = false;
+  bool _cleanupScheduled = false;
 
   @override
   void didChangeDependencies() {
@@ -41,6 +43,12 @@ class _HomePageState extends ConsumerState<HomePage> {
         Navigator.of(context).push(
           MaterialPageRoute(builder: (_) => const UploadPage()),
         );
+      });
+    }
+    if (!_cleanupScheduled) {
+      _cleanupScheduled = true;
+      Future.delayed(const Duration(seconds: 10), () async {
+        try { await ref.read(tempCleanerProvider).cleanTemp(); } catch (_) {}
       });
     }
   }

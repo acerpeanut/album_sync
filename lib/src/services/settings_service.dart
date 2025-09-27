@@ -16,6 +16,12 @@ const _kRecentDays = 'recentDays';
 const _kRecentPages = 'recentPages';
 const _kParallelScanUpload = 'parallelScanUpload';
 const _kLastSuccessTs = 'lastSuccessTs';
+const _kEnableContentHash = 'enableContentHash';
+const _kHashWifiOnly = 'hashWifiOnly';
+const _kBootstrapRemoteIndex = 'bootstrapRemoteIndex';
+const _kAllowReorganizeMove = 'allowReorganizeMove';
+const _kHashDuringScan = 'hashDuringScan';
+const _kRemoteIndexTs = 'remoteIndexTs';
 
 class AppSettings {
   final String? baseUrl;
@@ -28,6 +34,11 @@ class AppSettings {
   final int recentDays;
   final int recentPages;
   final bool parallelScanUpload;
+  final bool enableContentHash;
+  final bool hashWifiOnly;
+  final bool bootstrapRemoteIndex;
+  final bool allowReorganizeMove;
+  final bool hashDuringScan;
 
   const AppSettings({
     required this.baseUrl,
@@ -40,6 +51,11 @@ class AppSettings {
     required this.recentDays,
     required this.recentPages,
     required this.parallelScanUpload,
+    required this.enableContentHash,
+    required this.hashWifiOnly,
+    required this.bootstrapRemoteIndex,
+    required this.allowReorganizeMove,
+    required this.hashDuringScan,
   });
 
   bool get isConfigured =>
@@ -57,6 +73,11 @@ class AppSettings {
     int? recentDays,
     int? recentPages,
     bool? parallelScanUpload,
+    bool? enableContentHash,
+    bool? hashWifiOnly,
+    bool? bootstrapRemoteIndex,
+    bool? allowReorganizeMove,
+    bool? hashDuringScan,
   }) {
     return AppSettings(
       baseUrl: baseUrl ?? this.baseUrl,
@@ -69,6 +90,11 @@ class AppSettings {
       recentDays: recentDays ?? this.recentDays,
       recentPages: recentPages ?? this.recentPages,
       parallelScanUpload: parallelScanUpload ?? this.parallelScanUpload,
+      enableContentHash: enableContentHash ?? this.enableContentHash,
+      hashWifiOnly: hashWifiOnly ?? this.hashWifiOnly,
+      bootstrapRemoteIndex: bootstrapRemoteIndex ?? this.bootstrapRemoteIndex,
+      allowReorganizeMove: allowReorganizeMove ?? this.allowReorganizeMove,
+      hashDuringScan: hashDuringScan ?? this.hashDuringScan,
     );
   }
 }
@@ -92,6 +118,11 @@ class SettingsService {
     final recentDays = prefs.getInt(_kRecentDays) ?? 7;
     final recentPages = prefs.getInt(_kRecentPages) ?? 0;
     final parallelScanUpload = prefs.getBool(_kParallelScanUpload) ?? true;
+    final enableContentHash = prefs.getBool(_kEnableContentHash) ?? true;
+    final hashWifiOnly = prefs.getBool(_kHashWifiOnly) ?? true;
+    final bootstrapRemoteIndex = prefs.getBool(_kBootstrapRemoteIndex) ?? true;
+    final allowReorganizeMove = prefs.getBool(_kAllowReorganizeMove) ?? false;
+    final hashDuringScan = prefs.getBool(_kHashDuringScan) ?? false;
     return AppSettings(
       baseUrl: baseUrl,
       username: username,
@@ -103,6 +134,11 @@ class SettingsService {
       recentDays: recentDays,
       recentPages: recentPages,
       parallelScanUpload: parallelScanUpload,
+      enableContentHash: enableContentHash,
+      hashWifiOnly: hashWifiOnly,
+      bootstrapRemoteIndex: bootstrapRemoteIndex,
+      allowReorganizeMove: allowReorganizeMove,
+      hashDuringScan: hashDuringScan,
     );
   }
 
@@ -118,6 +154,11 @@ class SettingsService {
     int recentDays = 7,
     int recentPages = 0,
     bool parallelScanUpload = true,
+    bool enableContentHash = true,
+    bool hashWifiOnly = true,
+    bool bootstrapRemoteIndex = true,
+    bool allowReorganizeMove = false,
+    bool hashDuringScan = false,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kBaseUrl, baseUrl);
@@ -130,6 +171,11 @@ class SettingsService {
     await prefs.setInt(_kRecentDays, recentDays);
     await prefs.setInt(_kRecentPages, recentPages);
     await prefs.setBool(_kParallelScanUpload, parallelScanUpload);
+    await prefs.setBool(_kEnableContentHash, enableContentHash);
+    await prefs.setBool(_kHashWifiOnly, hashWifiOnly);
+    await prefs.setBool(_kBootstrapRemoteIndex, bootstrapRemoteIndex);
+    await prefs.setBool(_kAllowReorganizeMove, allowReorganizeMove);
+    await prefs.setBool(_kHashDuringScan, hashDuringScan);
     await _secure.write(key: _kPasswordKey, value: password);
   }
 
@@ -149,6 +195,11 @@ class SettingsService {
     await prefs.remove(_kRecentDays);
     await prefs.remove(_kRecentPages);
     await prefs.remove(_kParallelScanUpload);
+    await prefs.remove(_kEnableContentHash);
+    await prefs.remove(_kHashWifiOnly);
+    await prefs.remove(_kBootstrapRemoteIndex);
+    await prefs.remove(_kAllowReorganizeMove);
+    await prefs.remove(_kHashDuringScan);
     await _secure.delete(key: _kPasswordKey);
   }
 
@@ -191,6 +242,11 @@ class SettingsController extends StateNotifier<AsyncValue<AppSettings>> {
     int recentDays = 7,
     int recentPages = 0,
     bool parallelScanUpload = true,
+    bool enableContentHash = true,
+    bool hashWifiOnly = true,
+    bool bootstrapRemoteIndex = true,
+    bool allowReorganizeMove = false,
+    bool hashDuringScan = false,
   }) async {
     state = const AsyncValue.loading();
     await _service.save(
@@ -205,8 +261,24 @@ class SettingsController extends StateNotifier<AsyncValue<AppSettings>> {
       recentDays: recentDays,
       recentPages: recentPages,
       parallelScanUpload: parallelScanUpload,
+      enableContentHash: enableContentHash,
+      hashWifiOnly: hashWifiOnly,
+      bootstrapRemoteIndex: bootstrapRemoteIndex,
+      allowReorganizeMove: allowReorganizeMove,
+      hashDuringScan: hashDuringScan,
     );
     await _load();
+  }
+
+  // --- Remote index timestamp helpers ---
+  Future<int?> loadRemoteIndexTs() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_kRemoteIndexTs);
+  }
+
+  Future<void> markRemoteIndexNow() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_kRemoteIndexTs, DateTime.now().millisecondsSinceEpoch);
   }
 
   Future<void> signOut() async {

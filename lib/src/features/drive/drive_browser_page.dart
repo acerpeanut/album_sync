@@ -468,6 +468,8 @@ class _DriveBrowserPageState extends ConsumerState<DriveBrowserPage> {
       final path = await _downloadToTemp(url, filename: filename, maxBytes: 512 * 1024 * 1024);
       final mime = _mimeFromNameAndCT(filename, e.contentType);
       await Share.shareXFiles([XFile(path, name: filename, mimeType: mime)]);
+      // Best-effort temp cleanup after share
+      Future.delayed(const Duration(seconds: 60), () async { try { final f = File(path); if (await f.exists()) await f.delete(); } catch (_) {} });
     } catch (err) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败: $err')));

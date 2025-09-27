@@ -12,6 +12,10 @@ import '../../core/config.dart';
 import '../../core/network.dart';
 import '../../data/db.dart';
 import '../../services/settings_service.dart';
+import '../../services/hash_service.dart';
+import '../../services/temp_cleaner.dart';
+import '../../services/remote_indexer.dart';
+import '../../core/server_key.dart';
 
 class UploadSummary {
   final int total;
@@ -91,6 +95,31 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
           throw Exception('当前非 Wi‑Fi 网络，已按设置阻止上传');
         }
       }
+      // Optional: bootstrap remote index on first run to enable cross-reinstall dedupe
+      try {
+        if (settings.enableContentHash && settings.bootstrapRemoteIndex) {
+          final serverKey = buildServerKey(settings.baseUrl!, settings.username!);
+          final cnt = await AppDatabase.remoteIndexCount(serverKey);
+          final lastTs = await ref.read(settingsControllerProvider.notifier).loadRemoteIndexTs();
+          final ttlOk = lastTs != null && DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(lastTs)) < const Duration(hours: 24);
+          if (cnt == 0 || !ttlOk) {
+            // Run in background to avoid blocking scan too long
+            () async {
+              try {
+                final pwd = await ref.read(settingsServiceProvider).loadPassword() ?? '';
+                await ref.read(remoteIndexerProvider).bootstrap(
+                      baseUrl: settings.baseUrl!,
+                      username: settings.username!,
+                      password: pwd,
+                      baseRemoteDir: settings.baseRemoteDir ?? '/',
+                    );
+                await ref.read(settingsControllerProvider.notifier).markRemoteIndexNow();
+              } catch (_) {}
+            }();
+          }
+        }
+      } catch (_) {}
+
       // Enumerate albums and assets
       final includeVideos = settings.includeVideos;
       FilterOptionGroup? filterGroup;
@@ -113,6 +142,10 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
       log.i('buildPlan: albums=${paths.length}');
       // Disambiguate albums with same display name by appending short id suffix
       final nameCount = <String, int>{};
+      // hashDuringScan controls whether to compute hashes during planning to skip enqueue
+      final bool hashScanEnabled = settings.enableContentHash && settings.hashDuringScan && (!settings.hashWifiOnly || await isOnWifi());
+      final String scanServerKey = hashScanEnabled ? buildServerKey(settings.baseUrl!, settings.username!) : '';
+
       for (final p in paths) {
         final t = sanitizeSegment(p.name);
         nameCount[t] = (nameCount[t] ?? 0) + 1;
@@ -160,6 +193,25 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
             if (seen.contains(key)) { skipped++; consecutiveSeen++; continue; }
             seen.add(key);
             consecutiveSeen = 0;
+            if (hashScanEnabled) {
+              try {
+                final f = await a.file;
+                if (f != null) {
+                  final md5 = await ref.read(hashServiceProvider).computeMd5(f);
+                  final hit = await AppDatabase.findRemoteByHash(serverKey: scanServerKey, hash: md5);
+                  if (hit != null) { skipped++; continue; }
+                  tasks.add(UploadTask(
+                    assetId: a.id,
+                    albumTitle: albumTitle,
+                    remotePath: remotePath,
+                    bytesTotal: 0,
+                    status: TaskStatus.queued,
+                    hash: md5,
+                  ));
+                  continue;
+                }
+              } catch (_) {}
+            }
             tasks.add(UploadTask(
               assetId: a.id,
               albumTitle: albumTitle,
@@ -247,6 +299,12 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
       _activeWorkers--;
       if (_activeWorkers <= 0) {
         _workersLaunched = false;
+        // Trigger a background temp cleanup when all workers finish
+        // fire-and-forget to avoid blocking UI
+        () async {
+          try { await Future<void>.delayed(const Duration(seconds: 1)); } catch (_) {}
+          try { await ref.read(tempCleanerProvider).cleanTemp(); } catch (_) {}
+        }();
       }
       _refreshStats();
     });
@@ -392,15 +450,17 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
           continue;
         }
         final size = await file.length();
+        final localPath = file.path;
         var effectiveRemotePath = task.remotePath;
         final info = await _remoteInfo(baseUrl, username, password, effectiveRemotePath);
         if (info.exists) {
           if (info.size != null && info.size == size) {
-            if (kVerboseLog) log.i('worker: exists and same size, skip id=${task.id}');
+            if (kVerboseLog) log.i('worker: exists and same size, skip id=${task.id} reason=SIZE_MATCH');
             await AppDatabase.updateTotalBytes(task.id!, size);
             await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
             await ref.read(settingsServiceProvider).markLastSuccessNow();
             _onUploadSuccess();
+            try { await ref.read(tempCleanerProvider).maybeDeleteTempFile(localPath); } catch (_) {}
             continue;
           } else {
             // Rename with short id suffix to avoid collision
@@ -416,6 +476,50 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
         if (kVerboseLog) log.i('worker: will PUT size=$size id=${task.id}');
         // Persist total size for progress UI (only once per task)
         try { await AppDatabase.updateTotalBytes(task.id!, size); } catch (_) {}
+        // Optional MD5 for OC-Checksum and remote-index dedupe (behind flag and Wi‑Fi constraint)
+        String? md5hex;
+        try {
+          final curSettings = ref.read(settingsControllerProvider).value!;
+          final allow = curSettings.enableContentHash && (!curSettings.hashWifiOnly || await isOnWifi());
+          if (allow) {
+            md5hex = await ref.read(hashServiceProvider).computeMd5(file);
+          }
+        } catch (_) {}
+        // Persist hash for this task when known
+        try { if (md5hex != null && task.id != null) await AppDatabase.updateTaskHash(task.id!, md5hex!); } catch (_) {}
+        // If remote index already has this hash, skip upload entirely
+        if (md5hex != null && md5hex.isNotEmpty) {
+          try {
+            final s = ref.read(settingsControllerProvider).value!;
+            final key = buildServerKey(s.baseUrl!, s.username!);
+            final hit = await AppDatabase.findRemoteByHash(serverKey: key, hash: md5hex!);
+            if (hit != null) {
+              final existingPath = hit['path'] as String?;
+              final allowMove = s.allowReorganizeMove == true;
+              if (existingPath != null && allowMove && existingPath != effectiveRemotePath) {
+                // Try MOVE to new path instead of re-upload
+                try {
+                  final moved = await _move(baseUrl, username, password, existingPath, effectiveRemotePath);
+                  if (moved) {
+                    if (kVerboseLog) log.i('worker: MOVE $existingPath -> $effectiveRemotePath');
+                    await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
+                    await ref.read(settingsServiceProvider).markLastSuccessNow();
+                    _onUploadSuccess();
+                    try { await ref.read(tempCleanerProvider).maybeDeleteTempFile(localPath); } catch (_) {}
+                    continue;
+                  }
+                } catch (_) {}
+              }
+              if (kVerboseLog) log.i('worker: remote-index hit -> skip upload id=${task.id} reason=HASH_HIT');
+              await AppDatabase.updateTotalBytes(task.id!, size);
+              await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
+              await ref.read(settingsServiceProvider).markLastSuccessNow();
+              _onUploadSuccess();
+              try { await ref.read(tempCleanerProvider).maybeDeleteTempFile(localPath); } catch (_) {}
+              continue;
+            }
+          } catch (_) {}
+        }
         int sent = 0;
         int lastRefresh = DateTime.now().millisecondsSinceEpoch;
         int lastDbWritten = 0;
@@ -432,75 +536,94 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
         req.contentLength = size;
         req.headers['Authorization'] = _basicAuth(username, password);
         req.headers['Content-Type'] = 'application/octet-stream';
+        req.headers['If-None-Match'] = '*';
+        if (md5hex != null && md5hex.isNotEmpty) {
+          req.headers['OC-Checksum'] = 'MD5:$md5hex';
+        }
         if (kDryRun) {
           if (kVerboseLog) log.w('worker: DRY_RUN skip PUT id=${task.id}');
           await AppDatabase.updateProgress(task.id!, 0, TaskStatus.done);
           if (dbTimer.isActive) dbTimer.cancel();
         } else {
           try {
-            // Strategy: small files buffered, larger files streaming with progress.
-            // Lower threshold to 4MB to avoid long blocking waits without progress.
-            if (size <= 4 * 1024 * 1024) {
-              final bytes = await file.readAsBytes();
+            // Always use streaming upload to reduce memory footprint
+            req.headers['Connection'] = 'close';
+            final mb = (size / (1024 * 1024)).ceil();
+            final secs = (60 + mb * 4).clamp(60, 1800); // allow larger files
+            final responseFuture = _client.send(req).timeout(Duration(seconds: secs));
+            final stream = file.openRead().map((chunk) {
               if (_cancelling || _cancelled.contains(task.id!)) {
                 throw _CancelledUpload();
               }
-              final r = await _client
-                  .put(
-                    uri,
-                    headers: {
-                      'Authorization': _basicAuth(username, password),
-                      'Content-Type': 'application/octet-stream',
-                    },
-                    body: bytes,
-                  )
-                  .timeout(const Duration(seconds: 60));
-              if (kVerboseLog) log.i('worker: PUT(buffered) status=${r.statusCode} id=${task.id}');
-              if (r.statusCode >= 200 && r.statusCode < 300) {
-                await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
-                await ref.read(settingsServiceProvider).markLastSuccessNow();
-                _updateDirIndexAfterSuccess(effectiveRemotePath, size);
-                _onUploadSuccess();
-              } else {
-                await _handleHttpFailure(task, r.statusCode);
+              sent += chunk.length;
+              final now = DateTime.now().millisecondsSinceEpoch;
+              if (now - lastRefresh > 800) {
+                lastRefresh = now;
+                _refreshStats();
               }
-              if (dbTimer.isActive) dbTimer.cancel();
-            } else {
-              // Add explicit connection close to avoid problematic keep-alive stalls on some servers
-              req.headers['Connection'] = 'close';
-              // Begin sending before piping body to ensure the consumer is attached to the sink
-              final mb = (size / (1024 * 1024)).ceil();
-              final secs = (60 + mb * 4).clamp(60, 1800); // allow larger files
-              final responseFuture = _client.send(req).timeout(Duration(seconds: secs));
-              final stream = file.openRead().map((chunk) {
-                if (_cancelling || _cancelled.contains(task.id!)) {
-                  throw _CancelledUpload();
-                }
-                sent += chunk.length;
-                final now = DateTime.now().millisecondsSinceEpoch;
-                if (now - lastRefresh > 800) {
-                  lastRefresh = now;
-                  // best-effort: no await inside stream mapping
-                  _refreshStats();
-                }
-                return chunk;
-              });
+              return chunk;
+            });
+            try {
+              await req.sink.addStream(stream);
+            } finally {
+              await req.sink.close();
+              dbTimer.cancel();
+            }
+            final resp = await responseFuture;
+            if (kVerboseLog) log.i('worker: PUT(stream) status=${resp.statusCode} id=${task.id}');
+            if (resp.statusCode >= 200 && resp.statusCode < 300) {
+              await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
+              await ref.read(settingsServiceProvider).markLastSuccessNow();
+              _updateDirIndexAfterSuccess(effectiveRemotePath, size);
+              _onUploadSuccess();
+              // update indices for future re-installs
               try {
-                await req.sink.addStream(stream);
-              } finally {
-                await req.sink.close();
-                dbTimer.cancel();
-              }
-              final resp = await responseFuture;
-              if (kVerboseLog) log.i('worker: PUT(stream) status=${resp.statusCode} id=${task.id}');
-              if (resp.statusCode >= 200 && resp.statusCode < 300) {
-                await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
-                await ref.read(settingsServiceProvider).markLastSuccessNow();
-                _updateDirIndexAfterSuccess(effectiveRemotePath, size);
-                _onUploadSuccess();
-              } else {
-                await _handleHttpFailure(task, resp.statusCode);
-              }
+                if (md5hex != null && md5hex!.isNotEmpty) {
+                  final s = ref.read(settingsControllerProvider).value!;
+                  final key = buildServerKey(s.baseUrl!, s.username!);
+                  await AppDatabase.upsertRemoteIndex(serverKey: key, path: effectiveRemotePath, hash: md5hex, size: size, etag: null);
+                  await AppDatabase.upsertAssetIndex(assetId: task.assetId, serverKey: key, hash: md5hex, canonicalRemotePath: effectiveRemotePath, size: size, etag: null);
+                  // manifest append (best-effort)
+                  await _appendManifestPart(
+                    baseUrl: s.baseUrl!,
+                    username: s.username!,
+                    password: await ref.read(settingsServiceProvider).loadPassword() ?? '',
+                    baseRemoteDir: s.baseRemoteDir ?? '/',
+                    hash: md5hex!,
+                    path: effectiveRemotePath,
+                    size: size,
+                    etag: null,
+                  );
+                }
+              } catch (_) {}
+              try { await ref.read(tempCleanerProvider).maybeDeleteTempFile(localPath); } catch (_) {}
+            } else if (resp.statusCode == 412 || resp.statusCode == 409) {
+              // Treat as already exists (race), mark done without reupload
+              if (kVerboseLog) log.w('worker: PUT precondition/conflict -> done id=${task.id} reason=HTTP_412');
+              await AppDatabase.updateProgress(task.id!, size, TaskStatus.done);
+              await ref.read(settingsServiceProvider).markLastSuccessNow();
+              _onUploadSuccess();
+              try {
+                if (md5hex != null && md5hex!.isNotEmpty) {
+                  final s = ref.read(settingsControllerProvider).value!;
+                  final key = buildServerKey(s.baseUrl!, s.username!);
+                  await AppDatabase.upsertRemoteIndex(serverKey: key, path: effectiveRemotePath, hash: md5hex, size: size, etag: null);
+                  await AppDatabase.upsertAssetIndex(assetId: task.assetId, serverKey: key, hash: md5hex, canonicalRemotePath: effectiveRemotePath, size: size, etag: null);
+                  await _appendManifestPart(
+                    baseUrl: s.baseUrl!,
+                    username: s.username!,
+                    password: await ref.read(settingsServiceProvider).loadPassword() ?? '',
+                    baseRemoteDir: s.baseRemoteDir ?? '/',
+                    hash: md5hex!,
+                    path: effectiveRemotePath,
+                    size: size,
+                    etag: null,
+                  );
+                }
+              } catch (_) {}
+              try { await ref.read(tempCleanerProvider).maybeDeleteTempFile(localPath); } catch (_) {}
+            } else {
+              await _handleHttpFailure(task, resp.statusCode);
             }
           } on _CancelledUpload {
             if (kVerboseLog) log.w('worker: cancelled id=${task.id}');
@@ -510,6 +633,8 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
             final isTimeout = e2 is TimeoutException || '$e2'.toLowerCase().contains('timeout');
             await _handleFailure(task, '$e2', transient: isTimeout);
           }
+          // Best-effort temp cleanup even on failure; we can regenerate temp copy on retry
+          try { await ref.read(tempCleanerProvider).maybeDeleteTempFile(localPath); } catch (_) {}
         }
       } catch (e, st) {
         log.e('upload task error: $e\n$st');
@@ -805,6 +930,57 @@ class UploadController extends StateNotifier<AsyncValue<UploadSummary>> {
 
   String _basicAuth(String u, String p) =>
       'Basic ${base64.encode(utf8.encode('$u:$p'))}';
+
+  Future<void> _appendManifestPart({
+    required String baseUrl,
+    required String username,
+    required String password,
+    required String baseRemoteDir,
+    required String hash,
+    required String path,
+    required int size,
+    String? etag,
+  }) async {
+    // Build manifest dir: <baseRemoteDir>/.album_sync/index/
+    final base = baseRemoteDir.startsWith('/') ? baseRemoteDir.substring(1) : baseRemoteDir;
+    final segs = base.split('/').where((e) => e.isNotEmpty).toList();
+    final dirSegs = [...segs, '.album_sync', 'index'];
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final rnd = (math.Random().nextInt(1 << 20)).toRadixString(16);
+    final fileName = 'part-$ts-$rnd.jsonl';
+    final dirPath = joinUrlSegments(dirSegs);
+    final filePath = joinUrlSegments([...dirSegs, fileName]);
+    try {
+      await _ensureRemoteDir(baseUrl, username, password, '$dirPath/');
+      final uri = Uri.parse(_normalizeBaseUrl(baseUrl) + filePath.substring(1));
+      final body = '{"h":"$hash","p":"$path","s":$size,"e":${etag != null ? jsonEncode(etag) : 'null'},"t":$ts}\n';
+      final r = await _client.put(
+        uri,
+        headers: {
+          'Authorization': _basicAuth(username, password),
+          'Content-Type': 'text/plain; charset=utf-8',
+          'If-None-Match': '*',
+        },
+        body: utf8.encode(body),
+      );
+      if (kVerboseLog) log.i('manifest: append ${r.statusCode} $fileName');
+    } catch (_) {}
+  }
+  Future<bool> _move(String baseUrl, String username, String password, String fromPath, String toPath) async {
+    final src = Uri.parse(_normalizeBaseUrl(baseUrl) + (fromPath.startsWith('/') ? fromPath.substring(1) : fromPath));
+    final dst = Uri.parse(_normalizeBaseUrl(baseUrl) + (toPath.startsWith('/') ? toPath.substring(1) : toPath));
+    try {
+      final req = http.Request('MOVE', src)
+        ..headers['Authorization'] = _basicAuth(username, password)
+        ..headers['Destination'] = dst.toString()
+        ..headers['Overwrite'] = 'F';
+      final resp = await _client.send(req).timeout(const Duration(seconds: 60));
+      // 201/204/200 considered success depending on server
+      return resp.statusCode >= 200 && resp.statusCode < 300;
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<void> _refreshStats() async {
     final map = await AppDatabase.stats();

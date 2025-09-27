@@ -283,6 +283,8 @@ class _DriveNativePreviewPageState extends State<DriveNativePreviewPage> {
       final f = File(path);
       await f.writeAsBytes(bytes, flush: true);
       await Share.shareXFiles([XFile(path, mimeType: mime, name: filename)]);
+      // Best-effort temp cleanup after share
+      Future.delayed(const Duration(seconds: 60), () async { try { if (await f.exists()) await f.delete(); } catch (_) {} });
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败: $e')));

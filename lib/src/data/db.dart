@@ -15,6 +15,7 @@ class UploadTask {
   final int retries;
   final String? lastError;
   final int priority;
+  final String? hash;
 
   const UploadTask({
     this.id,
@@ -27,6 +28,7 @@ class UploadTask {
     this.retries = 0,
     this.lastError,
     this.priority = 0,
+    this.hash,
   });
 
   UploadTask copyWith({
@@ -40,6 +42,7 @@ class UploadTask {
     int? retries,
     String? lastError,
     int? priority,
+    String? hash,
   }) {
     return UploadTask(
       id: id ?? this.id,
@@ -52,6 +55,7 @@ class UploadTask {
       retries: retries ?? this.retries,
       lastError: lastError ?? this.lastError,
       priority: priority ?? this.priority,
+      hash: hash ?? this.hash,
     );
   }
 
@@ -66,6 +70,7 @@ class UploadTask {
         'retries': retries,
         'lastError': lastError,
         'priority': priority,
+        'hash': hash,
         'updatedAt': DateTime.now().millisecondsSinceEpoch,
       };
 
@@ -82,6 +87,7 @@ class UploadTask {
       retries: m['retries'] as int? ?? 0,
       lastError: m['lastError'] as String?,
       priority: m['priority'] as int? ?? 0,
+      hash: m['hash'] as String?,
     );
   }
 }
@@ -95,7 +101,7 @@ class AppDatabase {
     final path = p.join(dir.path, 'album_sync.db');
     _db = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
 CREATE TABLE upload_tasks (
@@ -116,6 +122,10 @@ CREATE INDEX idx_tasks_asset ON upload_tasks(assetId);
 CREATE UNIQUE INDEX idx_tasks_unique ON upload_tasks(assetId, remotePath);
 CREATE INDEX idx_tasks_updatedAt ON upload_tasks(updatedAt);
 ''');
+        // v4 additions
+        try { await db.execute('ALTER TABLE upload_tasks ADD COLUMN hash TEXT'); } catch (_) {}
+        try { await db.execute('CREATE INDEX IF NOT EXISTS idx_tasks_hash ON upload_tasks(hash)'); } catch (_) {}
+        await _createV4Tables(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -132,9 +142,44 @@ CREATE INDEX idx_tasks_updatedAt ON upload_tasks(updatedAt);
           try { await db.execute('ALTER TABLE upload_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
           await db.execute('CREATE INDEX IF NOT EXISTS idx_tasks_updatedAt ON upload_tasks(updatedAt)');
         }
+        if (oldVersion < 4) {
+          try { await db.execute('ALTER TABLE upload_tasks ADD COLUMN hash TEXT'); } catch (_) {}
+          try { await db.execute('CREATE INDEX IF NOT EXISTS idx_tasks_hash ON upload_tasks(hash)'); } catch (_) {}
+          await _createV4Tables(db);
+        }
       },
     );
     return _db!;
+  }
+
+  static Future<void> _createV4Tables(Database db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS asset_index (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  assetId TEXT NOT NULL,
+  hash TEXT,
+  canonicalRemotePath TEXT,
+  size INTEGER,
+  etag TEXT,
+  uploadedAt INTEGER,
+  serverKey TEXT NOT NULL,
+  UNIQUE(assetId, serverKey)
+);
+''');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_asset_index_hash ON asset_index(serverKey, hash)');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS remote_index (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  serverKey TEXT NOT NULL,
+  hash TEXT,
+  path TEXT NOT NULL,
+  size INTEGER,
+  etag TEXT,
+  updatedAt INTEGER,
+  UNIQUE(serverKey, hash)
+);
+''');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_remote_index_path ON remote_index(serverKey, path)');
   }
 
   static Future<void> clearAll() async {
@@ -241,6 +286,17 @@ CREATE INDEX idx_tasks_updatedAt ON upload_tasks(updatedAt);
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  static Future<void> updateTaskHash(int id, String hash) async {
+    final db = await instance();
+    await db.update('upload_tasks',
+        {
+          'hash': hash,
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        },
+        where: 'id = ?',
+        whereArgs: [id]);
   }
 
   static Future<Map<String, int>> stats() async {
@@ -414,5 +470,115 @@ CREATE INDEX idx_tasks_updatedAt ON upload_tasks(updatedAt);
     final segs = decoded.split('/').where((e) => e.isNotEmpty).toList();
     final re = segs.map(Uri.encodeComponent).join('/');
     return '/$re';
+  }
+
+  // ---- v4: asset_index / remote_index DAO ----
+
+  static Future<void> upsertAssetIndex({
+    required String assetId,
+    required String serverKey,
+    String? hash,
+    String? canonicalRemotePath,
+    int? size,
+    String? etag,
+    int? uploadedAt,
+  }) async {
+    final db = await instance();
+    final now = uploadedAt ?? DateTime.now().millisecondsSinceEpoch;
+    final map = <String, Object?>{
+      'assetId': assetId,
+      'serverKey': serverKey,
+      'hash': hash,
+      'canonicalRemotePath': canonicalRemotePath,
+      'size': size,
+      'etag': etag,
+      'uploadedAt': now,
+    };
+    await db.transaction((txn) async {
+      final rows = await txn.query('asset_index',
+          where: 'assetId = ? AND serverKey = ?', whereArgs: [assetId, serverKey], limit: 1);
+      if (rows.isEmpty) {
+        await txn.insert('asset_index', map);
+      } else {
+        await txn.update('asset_index', map, where: 'assetId = ? AND serverKey = ?', whereArgs: [assetId, serverKey]);
+      }
+    });
+  }
+
+  static Future<void> upsertRemoteIndex({
+    required String serverKey,
+    required String path,
+    String? hash,
+    int? size,
+    String? etag,
+    int? updatedAt,
+  }) async {
+    if (hash == null || hash.isEmpty) return; // only index when hash is known
+    final db = await instance();
+    final now = updatedAt ?? DateTime.now().millisecondsSinceEpoch;
+    final map = <String, Object?>{
+      'serverKey': serverKey,
+      'hash': hash,
+      'path': path,
+      'size': size,
+      'etag': etag,
+      'updatedAt': now,
+    };
+    await db.insert('remote_index', map, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<Map<String, Object?>?> findRemoteByHash({
+    required String serverKey,
+    required String hash,
+  }) async {
+    final db = await instance();
+    final rows = await db.query('remote_index',
+        where: 'serverKey = ? AND hash = ?', whereArgs: [serverKey, hash], limit: 1);
+    if (rows.isEmpty) return null;
+    return rows.first;
+  }
+
+  static Future<int> remoteIndexCount(String serverKey) async {
+    final db = await instance();
+    final x = Sqflite.firstIntValue(await db.rawQuery(
+          'SELECT COUNT(*) FROM remote_index WHERE serverKey = ?',
+          [serverKey],
+        )) ??
+        0;
+    return x;
+  }
+
+  static Future<void> vacuum() async {
+    final db = await instance();
+    await db.execute('VACUUM');
+  }
+
+  static Future<int> pruneTasks({
+    int keepDoneDays = 30,
+    int keepFailedDays = 60,
+    int maxDone = 50000,
+  }) async {
+    final db = await instance();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    int deleted = 0;
+    // delete old done
+    final doneDeadline = now - keepDoneDays * 24 * 3600 * 1000;
+    deleted += await db.delete('upload_tasks', where: 'status = ? AND updatedAt < ?', whereArgs: [TaskStatus.done.name, doneDeadline]);
+    // delete old failed
+    final failedDeadline = now - keepFailedDays * 24 * 3600 * 1000;
+    deleted += await db.delete('upload_tasks', where: 'status = ? AND updatedAt < ?', whereArgs: [TaskStatus.failed.name, failedDeadline]);
+    // enforce max done by deleting oldest beyond limit
+    final c = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM upload_tasks WHERE status = ?', [TaskStatus.done.name])) ?? 0;
+    if (c > maxDone) {
+      final toDelete = c - maxDone;
+      final ids = await db.rawQuery(
+          'SELECT id FROM upload_tasks WHERE status = ? ORDER BY updatedAt ASC LIMIT ?',
+          [TaskStatus.done.name, toDelete]);
+      for (final row in ids) {
+        final id = row['id'] as int;
+        deleted += await db.delete('upload_tasks', where: 'id = ?', whereArgs: [id]);
+      }
+    }
+    return deleted;
   }
 }

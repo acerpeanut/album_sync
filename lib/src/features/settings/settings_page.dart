@@ -26,6 +26,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   int _recentDays = 7;
   int _recentPages = 0;
   bool _parallelScanUpload = true;
+  bool _enableContentHash = true;
+  bool _hashWifiOnly = true;
+  bool _bootstrapRemoteIndex = true;
+  bool _allowReorganizeMove = false;
+  bool _hashDuringScan = false;
 
   @override
   void initState() {
@@ -41,6 +46,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _recentDays = s?.recentDays ?? 7;
     _recentPages = s?.recentPages ?? 0;
     _parallelScanUpload = s?.parallelScanUpload ?? true;
+    _enableContentHash = s?.enableContentHash ?? true;
+    _hashWifiOnly = s?.hashWifiOnly ?? true;
+    _bootstrapRemoteIndex = s?.bootstrapRemoteIndex ?? true;
+    _allowReorganizeMove = s?.allowReorganizeMove ?? false;
+    _hashDuringScan = s?.hashDuringScan ?? false;
   }
 
   @override
@@ -84,6 +94,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           recentDays: _recentDays,
           recentPages: _recentPages,
           parallelScanUpload: _parallelScanUpload,
+          enableContentHash: _enableContentHash,
+          hashWifiOnly: _hashWifiOnly,
+          bootstrapRemoteIndex: _bootstrapRemoteIndex,
+          allowReorganizeMove: _allowReorganizeMove,
+          hashDuringScan: _hashDuringScan,
         );
     if (!mounted) return;
     Navigator.of(context).pop(true);
@@ -166,6 +181,36 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 title: const Text('扫描与上传并行（更快）'),
                 value: _parallelScanUpload,
                 onChanged: (v) => setState(() => _parallelScanUpload = v),
+              ),
+              const Divider(),
+              const Text('去重与重装', style: TextStyle(fontWeight: FontWeight.bold)),
+              SwitchListTile(
+                title: const Text('启用内容哈希去重'),
+                subtitle: const Text('计算MD5用于远端去重（推荐，仅Wi‑Fi时进行）'),
+                value: _enableContentHash,
+                onChanged: (v) => setState(() => _enableContentHash = v),
+              ),
+              SwitchListTile(
+                title: const Text('仅 Wi‑Fi 计算哈希'),
+                value: _hashWifiOnly,
+                onChanged: (v) => setState(() => _hashWifiOnly = v),
+              ),
+              SwitchListTile(
+                title: const Text('启动时引导远端索引'),
+                value: _bootstrapRemoteIndex,
+                onChanged: (v) => setState(() => _bootstrapRemoteIndex = v),
+              ),
+              SwitchListTile(
+                title: const Text('扫描阶段哈希去重（实验）'),
+                subtitle: const Text('扫描时若命中远端索引则不入队，可能影响速度'),
+                value: _hashDuringScan,
+                onChanged: (v) => setState(() => _hashDuringScan = v),
+              ),
+              SwitchListTile(
+                title: const Text('允许按新规则重组（MOVE）'),
+                subtitle: const Text('命中哈希但路径不同，则尝试服务器MOVE而非重传'),
+                value: _allowReorganizeMove,
+                onChanged: (v) => setState(() => _allowReorganizeMove = v),
               ),
               Row(children: [
                 const Text('并发上传数：'),
